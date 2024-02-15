@@ -1,9 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const mysql = require('mysql2/promise');
-const app = express();
-// const bcrypt = require('bcrypt');
-const jwt = require('jsonwebtoken')
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
 //Users table should have refreshToken datatype VARCHAR 60
 //username-> VARCHAR 15 and password -> BLOB, UserID -> INT
 
@@ -12,6 +11,10 @@ const jwt = require('jsonwebtoken')
 //deleted_flag -> TINYINT
 require('dotenv').config();
 
+const app = express();
+app.use(express.json());
+app.use(cors());
+
 const port = process.env.PORT;
 
 const pool = mysql.createPool({
@@ -19,55 +22,67 @@ const pool = mysql.createPool({
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_DATABASE,
-  port: process.env.DB_PORT,
-  access: process.env.ACCESS_TOKEN_SECRET,
-  refresh: process.env.REFRESH_TOKEN_SECRET
+  port: process.env.DB_PORT
 });
-//gets blog posts for the user
-app.get('/posts', (req, res)=>{
-  res.json(posts.filter( post => post.username === req.user.name))
 
-})
-app.post('/login',(req, res)=>{
-  const refreshToken = req.body.token
-  if(refreshToken == null){
-    return res.sendStatus(401)
-  }
-  if(refreshToken.includes(refreshToken)){
-    return res.sendStatus(403)
-  }
-  jwt.verify(refreshToken, refresh, (err, user)=>{
-    if(err){
-      return res.sendStatus(403)
-    }
-    const accessToken = generateAccess({name: user.name})
-    res.json({ accessToken: accessToken})
-  })
-})
-//LOGIN USER  
 app.post('/login', async function(req, res) {
-  try{
-    const username = req.body.username;
-    const user = await req.db.query(`SELECT * FROM user WHERE user_name = :username`, { username });
-    const accessToken = generateAccess(user)
-    const refreshToken = jwt.sign(user,refresh)
-    res.json({ accessToken: accessToken, refreshToken: refreshToken})
-  } catch(err){
-    res.status(400).json({ msg: 'Error logging user in'})
+  try {
+    const { token, username } = req.body;
+
+    if (token) {
+      // If token is provided, verify it and generate a new access token
+      jwt.verify(token, process.env.REFRESH_TOKEN_SECRET, (err, user) => {
+        if (err) {
+          return res.sendStatus(403);
+        }
+        const accessToken = generateAccess({ username: user.name });
+        res.json({ accessToken });
+      });
+    } else if (username) {
+      // If username is provided, log in the user
+      const [userRows, userFields] = await pool.query(`SELECT * FROM users WHERE username = ?`, [username]);
+      const user = userRows[0];
+      if (!user) {
+        return res.status(404).json({ msg: 'User not found' });
+      }
+      const accessToken = generateAccess({ username: user.username });
+      const refreshToken = jwt.sign({ username: user.username }, process.env.REFRESH_TOKEN_SECRET);
+      res.json({ accessToken, refreshToken });
+    } else {
+      // If neither token nor username is provided, return an error
+      return res.status(400).json({ msg: 'Neither token nor username provided' });
+    }
+  } catch(err) {
+    console.error(err);
+    res.status(500).json({ msg: 'Internal server error' });
   }
 });
-//REGISTER USER
-// app.post('/register', async function (req, res){
-//   try{
-//     const hashPass = await bcrypt.hash(req.body.password, 10);
-//   } catch(err){
 
-//   }
-// });
+app.post('/register', async function(req, res) {
+  try {
+    const { username, password } = req.body;
+
+    // Check if username already exists in the database
+    const [existingUserRows, existingUserFields] = await pool.query(`SELECT * FROM users WHERE username = ?`, [username]);
+    if (existingUserRows.length > 0) {
+      return res.status(400).json({ msg: 'Username already exists' });
+    }
+
+    // Hash the password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Insert the new user into the database
+    await pool.query(`INSERT INTO users (username, password, refresh_token) VALUES (?, ?, ?)`, [username, hashedPassword, process.env.REFRESH_TOKEN_SECRET]);
+
+    res.status(201).json({ msg: 'User registered successfully' });
+  } catch(err) {
+    console.error(err);
+    res.status(500).json({ msg: 'Internal server error' });
+  }
+});
 
 function generateAccess(user){
-  return jwt.sign(user, access, {expiresIn: '15s'})
+  return jwt.sign(user, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '15s' }); // Expiration time set to 1 hour
 }
 
-//
 app.listen(port, () => console.log(`212 API Example listening on http://localhost:${port}`));
