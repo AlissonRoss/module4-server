@@ -28,7 +28,6 @@ const pool = mysql.createPool({
 app.post('/login', async function(req, res) {
   try {
     const { token, username } = req.body;
-
     if (token) {
       // If token is provided, verify it and generate a new access token
       jwt.verify(token, process.env.REFRESH_TOKEN_SECRET, (err, user) => {
@@ -45,8 +44,13 @@ app.post('/login', async function(req, res) {
       if (!user) {
         return res.status(404).json({ msg: 'User not found' });
       }
+      //generate access token
       const accessToken = generateAccess({ username: user.username });
+      //Generate refreshtoken
       const refreshToken = jwt.sign({ username: user.username }, process.env.REFRESH_TOKEN_SECRET);
+      //save refreshtoken into the sql query for that user
+      await pool.query('UPDATE `users` SET refresh_token = ? WHERE username = ?', [refreshToken, username]);
+      //returns the accesstoken and refreshtoken as a response
       res.json({ accessToken, refreshToken });
     } else {
       // If neither token nor username is provided, return an error
@@ -54,7 +58,7 @@ app.post('/login', async function(req, res) {
     }
   } catch(err) {
     console.error(err);
-    res.status(500).json({ msg: 'Internal server error' });
+    res.status(500).json({ msg: 'Internal server error: Error login user in' });
   }
 });
 
@@ -82,7 +86,7 @@ app.post('/register', async function(req, res) {
 });
 
 function generateAccess(user){
-  return jwt.sign(user, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '15s' }); // Expiration time set to 1 hour
+  return jwt.sign(user, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '60s' }); // Expiration time set to 60s for debugging
 }
 
 app.listen(port, () => console.log(`212 API Example listening on http://localhost:${port}`));
