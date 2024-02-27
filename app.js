@@ -24,10 +24,32 @@ const pool = mysql.createPool({
   database: process.env.DB_DATABASE,
   port: process.env.DB_PORT
 });
+app.use(async (req, res, next) => {
+  try {
+    // Connecting to our SQL db. req gets modified and is available down the line in other middleware and endpoint functions
+    req.db = await pool.getConnection();
+    req.db.connection.config.namedPlaceholders = true; //THIS IS VERY IMPORTANT
 
+    // Traditional mode ensures not null is respected for unsupplied fields, ensures valid JavaScript dates, etc.
+    await req.db.query('SET SESSION sql_mode = "TRADITIONAL"');
+    await req.db.query(`SET time_zone = '-8:00'`);
+
+    // Moves the request on down the line to the next middleware functions and/or the endpoint it's headed for
+    await next();
+
+    // After the endpoint has been reached and resolved, disconnects from the database
+    req.db.release();
+  } catch (err) {
+    // If anything downstream throw an error, we must release the connection allocated for the request
+    console.log(err)
+    // If an error occurs, disconnects from the database
+    if (req.db) req.db.release();
+    throw err;
+  }
+});
 app.post('/login', async function(req, res) {
   try {
-    const { token, username } = req.body;
+    const { token, username, password } = req.body;
     if (token) {
       // If token is provided, verify it and generate a new access token
       jwt.verify(token, process.env.REFRESH_TOKEN_SECRET, (err, user) => {
@@ -37,24 +59,26 @@ app.post('/login', async function(req, res) {
         const accessToken = generateAccess({ username: user.name });
         res.json({ accessToken });
       });
-    } else if (username) {
-      // If username is provided, log in the user
-      const [userRows, userFields] = await pool.query(`SELECT * FROM users WHERE username = ?`, [username]);
+    } else if (username && password) {
+      // If username and password are provided, attempt to log in the user
+      const [userRows] = await pool.query(`SELECT * FROM users WHERE username = :username`, {username});
       const user = userRows[0];
       if (!user) {
         return res.status(404).json({ msg: 'User not found' });
       }
-      //generate access token
+      // Compare the provided password with the hashed password stored in the database
+      const passwordMatch = await bcrypt.compare(String(password), String(user.password));
+      if (!passwordMatch) {
+        return res.status(401).json({ msg: 'Invalid password' });
+      }
+      // If password is correct, generate tokens and send the response
       const accessToken = generateAccess({ username: user.username });
-      //Generate refreshtoken
       const refreshToken = jwt.sign({ username: user.username }, process.env.REFRESH_TOKEN_SECRET);
-      //save refreshtoken into the sql query for that user
-      await pool.query('UPDATE `users` SET refresh_token = ? WHERE username = ?', [refreshToken, username]);
-      //returns the accesstoken and refreshtoken as a response
+      await pool.query('UPDATE `users` SET refresh_token =:refreshToken WHERE username =:username', {refreshToken, username});
       res.json({ accessToken, refreshToken });
     } else {
-      // If neither token nor username is provided, return an error
-      return res.status(400).json({ msg: 'Neither token nor username provided' });
+      // If neither token, nor username and password are provided, return an error
+      return res.status(400).json({ msg: 'Neither token nor username/password provided' });
     }
   } catch(err) {
     console.error(err);
@@ -65,9 +89,10 @@ app.post('/login', async function(req, res) {
 app.post('/register', async function(req, res) {
   try {
     const { username, password } = req.body;
-
+    const refresh_token = process.env.REFRESH_TOKEN_SECRET;
     // Check if username already exists in the database
-    const [existingUserRows, existingUserFields] = await pool.query(`SELECT * FROM users WHERE username = ?`, [username]);
+    const [existingUserRows] = await pool.query('SELECT * FROM users WHERE username = :username', { username });
+
     if (existingUserRows.length > 0) {
       return res.status(400).json({ msg: 'Username already exists' });
     }
@@ -76,7 +101,7 @@ app.post('/register', async function(req, res) {
     const hashedPassword = await bcrypt.hash(password, 10);
 
     // Insert the new user into the database
-    await pool.query(`INSERT INTO users (username, password, refresh_token) VALUES (?, ?, ?)`, [username, hashedPassword, process.env.REFRESH_TOKEN_SECRET]);
+    await pool.query(`INSERT INTO users (username, password, refresh_token) VALUES (:username, :hashedPassword, :refresh_token)`, {username, hashedPassword, refresh_token});
 
     res.status(201).json({ msg: 'User registered successfully' });
   } catch(err) {
